@@ -1,5 +1,5 @@
 # ============================================================
-# Астерал ГПТ — MOVIE NIGHT (For Render.com)
+# Астерал ГПТ — MOVIE NIGHT (For Render.com - Python 3.11)
 # ============================================================
 
 import os
@@ -10,7 +10,23 @@ import json
 import requests
 import subprocess
 import threading
+import sys
 from flask import Flask, render_template_string, request, send_file, abort, url_for, jsonify
+
+# Fix for Python 3.14 - monkey patch audioop if missing
+try:
+    import audioop
+except ImportError:
+    import importlib
+    import sys
+    # Create a dummy audioop module
+    class DummyAudioop:
+        def __getattr__(self, name):
+            def dummy(*args, **kwargs):
+                return b''
+            return dummy
+    sys.modules['audioop'] = DummyAudioop()
+
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -28,6 +44,14 @@ download_links: dict = {}
 # ---------- FLASK APP ----------
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
+
+# ---------- CORS HEADERS (Manual - no flask-cors needed) ----------
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    return response
 
 # ---------- HTML TEMPLATE ----------
 INDEX_TEMPLATE = """
