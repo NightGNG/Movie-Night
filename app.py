@@ -1,5 +1,5 @@
 # ============================================================
-# Астерал ГПТ — MOVIE NIGHT (For Render.com - Python 3.11)
+# Астерал ГПТ — MOVIE NIGHT (FIXED DOWNLOADING)
 # ============================================================
 
 import os
@@ -19,7 +19,6 @@ try:
 except ImportError:
     import importlib
     import sys
-    # Create a dummy audioop module
     class DummyAudioop:
         def __getattr__(self, name):
             def dummy(*args, **kwargs):
@@ -45,7 +44,7 @@ download_links: dict = {}
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 
-# ---------- CORS HEADERS (Manual - no flask-cors needed) ----------
+# ---------- CORS HEADERS ----------
 @app.after_request
 def after_request(response):
     response.headers.add('Access-Control-Allow-Origin', '*')
@@ -151,42 +150,126 @@ def tmdb_search(query):
         pass
     return []
 
+def tmdb_search_tv(query):
+    """Search TMDB for TV shows"""
+    url = f"https://api.themoviedb.org/3/search/tv"
+    params = {'api_key': TMDB_API_KEY, 'query': query, 'language': 'en-US'}
+    
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            return data.get('results', [])
+    except:
+        pass
+    return []
+
 def download_movie_file(title, year=None):
-    """Download a movie using yt-dlp"""
+    """Download a movie using yt-dlp with multiple fallback sources"""
     safe_title = re.sub(r'[^\w\s-]', '', title).strip()
     safe_title = re.sub(r'[-\s]+', '_', safe_title)
     filename = f"{safe_title}_{int(time.time())}.mp4"
     filepath = os.path.join(DOWNLOAD_FOLDER, filename)
     
+    # Try MANY different search queries
     sources = []
+    
+    # Primary searches
     if year:
+        sources.append(f"ytsearch:\"{title} {year} full movie\"")
+        sources.append(f"ytsearch:\"{title} {year} movie\"")
         sources.append(f"ytsearch:{title} {year} full movie")
+    
+    sources.append(f"ytsearch:\"{title} full movie\"")
+    sources.append(f"ytsearch:\"{title} movie full\"")
+    sources.append(f"ytsearch:\"{title} 1080p\"")
+    sources.append(f"ytsearch:\"{title} hd\"")
+    sources.append(f"ytsearch:{title} full movie")
+    sources.append(f"ytsearch:{title} movie")
+    
+    # Generic fallback
     sources.append(f"ytsearch:full movie {title}")
-    sources.append(f"ytsearch:{title} movie full hd")
+    sources.append(f"ytsearch:watch {title} online free")
+    
+    # Also try Dailymotion
+    sources.append(f"dmsearch:{title} full movie")
     
     ydl_opts = [
         "yt-dlp",
         "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
         "-o", filepath,
-        "--quiet",
         "--no-warnings",
-        "--ignore-errors"
+        "--ignore-errors",
+        "--no-check-certificate",
+        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "--socket-timeout", "30"
     ]
     
     for source in sources:
         try:
-            print(f"Trying to download: {source}")
+            print(f"🔍 Trying: {source}")
             cmd = ydl_opts + [source]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             
             if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
-                print(f"✅ Downloaded: {filepath}")
+                size_mb = os.path.getsize(filepath) / (1024 * 1024)
+                print(f"✅ Downloaded: {filepath} ({size_mb:.2f} MB)")
                 return filepath
+            else:
+                print(f"❌ No file created for: {source}")
+                # Check for other files that might have been created
+                for f in os.listdir(DOWNLOAD_FOLDER):
+                    if f.endswith('.mp4') and f.startswith(safe_title[:10]):
+                        full_path = os.path.join(DOWNLOAD_FOLDER, f)
+                        if os.path.getsize(full_path) > 0:
+                            print(f"✅ Found existing file: {f}")
+                            return full_path
+        except subprocess.TimeoutExpired:
+            print(f"⏰ Timeout for: {source}")
+            continue
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"❌ Error: {e}")
             continue
     
     return None
+
+def get_movie_info(query):
+    """Get movie info from TMDB - both movies and TV"""
+    # Check for URL
+    if query.startswith('http'):
+        # Try to extract IMDb ID
+        imdb_match = re.search(r'imdb\.com/title/(tt\d+)', query)
+        if imdb_match:
+            try:
+                url = f"https://api.themoviedb.org/3/find/{imdb_match.group(1)}"
+                params = {'api_key': TMDB_API_KEY, 'external_source': 'imdb_id'}
+                response = requests.get(url, params=params, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get('movie_results'):
+                        return data['movie_results'][0], 'movie'
+                    if data.get('tv_results'):
+                        return data['tv_results'][0], 'tv'
+            except:
+                pass
+        
+        # Try Netflix
+        netflix_match = re.search(r'netflix\.com/(?:watch|title)/(\d+)', query)
+        if netflix_match:
+            # Try to search by title from Netflix ID
+            pass
+    
+    # Search movies
+    results = tmdb_search(query)
+    if results:
+        return results[0], 'movie'
+    
+    # Search TV
+    results = tmdb_search_tv(query)
+    if results:
+        return results[0], 'tv'
+    
+    return None, None
 
 # ---------- FLASK ROUTES ----------
 @app.route('/')
@@ -207,7 +290,7 @@ def create_download():
         filepath = download_movie_file(title, year)
         
         if not filepath:
-            return jsonify({'error': f'Could not download "{title}"'}), 404
+            return jsonify({'error': f'Could not download "{title}". Try a different movie or source.'}), 404
         
         link_id = secrets.token_urlsafe(16)
         expiry_time = time.time() + 60
@@ -271,23 +354,23 @@ async def on_ready():
         print(f"❌ Failed to sync commands: {e}")
 
 @bot.tree.command(name="movie", description="🎬 Get a movie download link")
-@app_commands.describe(query="Movie name")
+@app_commands.describe(query="Movie name or link")
 async def movie_command(interaction: discord.Interaction, query: str):
     await interaction.response.defer()
     
-    # Search for movie
-    results = tmdb_search(query)
+    # Get movie info
+    movie, media_type = get_movie_info(query)
     
-    if not results:
-        await interaction.followup.send(f"❌ Could not find '{query}' on TMDB.")
+    if not movie:
+        await interaction.followup.send(f"❌ Could not find '{query}' on TMDB. Try a different movie.")
         return
     
-    movie = results[0]
-    title = movie.get('title')
-    year = movie.get('release_date', '')[:4]
+    title = movie.get('title') or movie.get('name')
+    year = movie.get('release_date', '')[:4] or movie.get('first_air_date', '')[:4]
     poster_path = movie.get('poster_path')
+    overview = movie.get('overview', 'No description available.')
     
-    await interaction.followup.send(f"🎬 **Movie Night** is downloading: **{title}** ({year})...\n*This may take a few minutes*")
+    await interaction.followup.send(f"🎬 **Movie Night** is searching for: **{title}** ({year})...\n*This may take a few minutes*")
     
     # Get host URL
     host_url = os.environ.get('RENDER_EXTERNAL_URL', 'http://localhost:5000')
@@ -304,8 +387,8 @@ async def movie_command(interaction: discord.Interaction, query: str):
             poster_url = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else ""
             
             embed = discord.Embed(
-                title=f"🎬 MOVIE NIGHT",
-                description=f"## ***{title}***\n**Thank you for using Movie Night Bot!** 🙏",
+                title=f"🎬 {title}",
+                description=f"**{year}**\n{overview[:200]}...",
                 color=discord.Color.gold()
             )
             
@@ -314,27 +397,32 @@ async def movie_command(interaction: discord.Interaction, query: str):
             
             embed.add_field(
                 name="📥 DOWNLOAD LINK",
-                value=f"[**Download {title}**]({download_url})\n*Auto-downloads when you click!*",
+                value=f"[**Click here to download {title}**]({download_url})\n*Auto-downloads when you click!*",
                 inline=False
             )
             embed.add_field(name="📅 Year", value=year or "N/A", inline=True)
             embed.add_field(name="⏰ Expires", value="60 seconds", inline=True)
-            embed.add_field(name="💬 Join Us", value="[Join Discord](https://discord.gg/mYBj8QEyeC)", inline=False)
-            embed.set_footer(text="🎬 Movie Night • Click the link and it auto-downloads!")
+            embed.set_footer(text="🎬 Movie Night • Thank you for using the bot!")
             
-            await interaction.followup.send(embed=embed)
+            await interaction.followup.send(
+                content=f"**Thank you for using Movie Night Bot!** 🙏",
+                embed=embed
+            )
         else:
-            await interaction.followup.send(f"❌ Could not download **{title}**. Try again later.")
+            error_msg = response.json().get('error', 'Unknown error')
+            await interaction.followup.send(f"❌ Could not download **{title}**. {error_msg}")
+    except requests.Timeout:
+        await interaction.followup.send(f"❌ Download timed out for **{title}**. Try again later.")
     except Exception as e:
         await interaction.followup.send(f"❌ Error: {str(e)}")
 
 @bot.tree.command(name="night", description="🎬 MOVIE NIGHT - Get a movie download link")
-@app_commands.describe(query="Movie name")
+@app_commands.describe(query="Movie name or link")
 async def night_command(interaction: discord.Interaction, query: str):
     await movie_command(interaction, query)
 
 @bot.tree.command(name="movies", description="🎬 Get a movie download link")
-@app_commands.describe(query="Movie name")
+@app_commands.describe(query="Movie name or link")
 async def movies_command(interaction: discord.Interaction, query: str):
     await movie_command(interaction, query)
 
@@ -352,6 +440,7 @@ if __name__ == "__main__":
     ║  🤖 Discord bot running in background                      ║
     ║  🌐 Web server running                                     ║
     ║  📥 Downloads movies using yt-dlp                         ║
+    ║  🔍 Searches multiple sources                              ║
     ╚═══════════════════════════════════════════════════════════════╝
     """)
     
